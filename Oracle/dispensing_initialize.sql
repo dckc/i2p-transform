@@ -95,54 +95,87 @@ insert /*+ APPEND*/ into dispensing (
 --    ,RAW_NDC
 )
 /* Below is the Cycle 2 fix for populating the DISPENSING table  */
-with disp_status as (
-  select ibf.patient_num, ibf.encounter_num, ibf.concept_cd, ibf.instance_num, ibf.start_date, ibf.modifier_cd
-  from i2b2fact ibf
-  join "&&i2b2_meta_schema".pcornet_med pnm
-    on ibf.modifier_cd=pnm.c_basecode
-  where pnm.c_fullname like '\PCORI_MOD\RX_BASIS\DI\%'
-    /* TODO: Generalize for other sites.  The '< 12' makes sure only 11 digit
-             codes are included. */
-    and length(replace(ibf.concept_cd, 'NDC:', '')) < 12
-    and ibf.patient_num between patient_num_first and patient_num_last
+with pnm as (
+  select  c_basecode, c_fullname
+  from "BLUEHERONMETADATA".pcornet_med pnm
 )
-, disp_quantity as (
-  select ibf.patient_num, ibf.encounter_num, ibf.concept_cd, ibf.instance_num, ibf.start_date, ibf.modifier_cd, ibf.nval_num
-  from i2b2fact ibf
-  join "&&i2b2_meta_schema".pcornet_med pnm
-    on ibf.modifier_cd=pnm.c_basecode
-  where pnm.c_fullname like '\PCORI_MOD\RX_QUANTITY\%'
-  and ibf.patient_num between patient_num_first and patient_num_last
+, basis_meta as (
+  select c_basecode
+  from pnm
+  where pnm.c_fullname between '\PCORI_MOD\RX_BASIS\DI\' and '\PCORI_MOD\RX_BASIS\DI\~'
 )
-, disp_supply as (
-  select ibf.patient_num, ibf.encounter_num, ibf.concept_cd, ibf.instance_num, ibf.start_date, ibf.modifier_cd, ibf.nval_num
-  from i2b2fact ibf
-  join "&&i2b2_meta_schema".pcornet_med pnm
-    on ibf.modifier_cd=pnm.c_basecode
-  where pnm.c_fullname like '\PCORI_MOD\RX_DAYS_SUPPLY\%'
-  and ibf.patient_num between patient_num_first and patient_num_last
+, qty_meta as (
+  select c_basecode
+  from pnm
+  where pnm.c_fullname between '\PCORI_MOD\RX_QUANTITY\' and '\PCORI_MOD\RX_QUANTITY\~'
 )
-select distinct
-  st.patient_num patid,
-  null prescribingid,
-  st.start_date dispense_date,
-  replace(st.concept_cd, 'NDC:', '') ndc, -- TODO: Generalize this for other sites.
-  ds.nval_num dispense_sup,
-  qt.nval_num dispense_amt
+, supply_meta as (
+  select c_basecode
+  from pnm
+  where pnm.c_fullname between '\PCORI_MOD\RX_DAYS_SUPPLY\' and '\PCORI_MOD\RX_DAYS_SUPPLY\~'
+)
+
+, ndc_pat_grp as (
+  select /*+ parallel(0) */ ibf.*, replace(concept_cd, 'NDC:', '') ndc
+  from i2b2fact ibf
+  where patient_num between 1 and 13000 --  :patient_num_first and :patient_num_last
+  and concept_cd between 'NDC:' and 'NDC:~'
+  and length(concept_cd) <= (4 + 11)
+)
+
+, disp_status as
+  (select ibf.patient_num
+  , ibf.encounter_num
+  , ibf.concept_cd
+  , ibf.instance_num
+  , ibf.start_date
+  , ibf.modifier_cd
+  , ibf.ndc
+  from ndc_pat_grp ibf
+  where exists (select 1 from basis_meta where ibf.modifier_cd = basis_meta.c_basecode))
+
+, disp_quantity as
+  (select ibf.patient_num
+  , ibf.encounter_num
+  , ibf.concept_cd
+  , ibf.instance_num
+  , ibf.start_date
+  , ibf.modifier_cd
+  , ibf.nval_num
+  from ndc_pat_grp ibf
+  where exists (select 1 from qty_meta where ibf.modifier_cd = qty_meta.c_basecode))
+
+, disp_supply as
+  (select ibf.patient_num
+  , ibf.encounter_num
+  , ibf.concept_cd
+  , ibf.instance_num
+  , ibf.start_date
+  , ibf.modifier_cd
+  , ibf.nval_num
+  from ndc_pat_grp ibf
+  where exists (select 1 from supply_meta where ibf.modifier_cd = supply_meta.c_basecode))
+
+
+select distinct st.patient_num patid
+, null prescribingid
+, st.start_date dispense_date
+, st.ndc
+, ds.nval_num dispense_sup
+, qt.nval_num dispense_amt
 from disp_status st
 left outer join disp_quantity qt
-  on st.patient_num=qt.patient_num
-  and st.encounter_num=qt.encounter_num
-  and st.concept_cd=qt.concept_cd
-  and st.instance_num=qt.instance_num
-  and st.start_date=qt.start_date
+on st.patient_num      = qt.patient_num
+  and st.encounter_num = qt.encounter_num
+  and st.concept_cd    = qt.concept_cd
+  and st.instance_num  = qt.instance_num
+  and st.start_date    = qt.start_date
 left outer join disp_supply ds
-  on st.patient_num=ds.patient_num
-  and st.encounter_num=ds.encounter_num
-  and st.concept_cd=ds.concept_cd
-  and st.instance_num=ds.instance_num
-  and st.start_date=ds.start_date
-  and st.patient_num between patient_num_first and patient_num_last
+on st.patient_num      = ds.patient_num
+  and st.encounter_num = ds.encounter_num
+  and st.concept_cd    = ds.concept_cd
+  and st.instance_num  = ds.instance_num
+  and st.start_date    = ds.start_date
 ;
 
 commit;
